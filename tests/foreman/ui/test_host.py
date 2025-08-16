@@ -29,6 +29,7 @@ import yaml
 from robottelo.config import settings
 from robottelo.constants import (
     ANY_CONTEXT,
+    DEFAULT_ARCHITECTURE,
     DEFAULT_CV,
     DEFAULT_LOC,
     DUMMY_BOOTC_FACTS,
@@ -37,12 +38,15 @@ from robottelo.constants import (
     FAKE_7_CUSTOM_PACKAGE,
     FAKE_8_CUSTOM_PACKAGE,
     FAKE_8_CUSTOM_PACKAGE_NAME,
+    FOREMAN_PROVIDERS,
     OSCAP_PERIOD,
     OSCAP_WEEKDAY,
     REPO_TYPE,
+    REPOS,
     ROLES,
 )
 from robottelo.constants.repos import CUSTOM_FILE_REPO
+from robottelo.exceptions import APIResponseError
 from robottelo.utils.datafactory import gen_string
 from tests.foreman.api.test_errata import cv_publish_promote
 
@@ -160,20 +164,6 @@ def tracer_install_host(rex_contenthost, target_sat):
             **{f'rhel{rhelver}_os': settings.repos[f'rhel{rhelver}_os']}
         )
     return rex_contenthost
-
-
-@pytest.fixture
-def new_host_ui(target_sat):
-    """Changes the setting to use the New All Host UI
-    then returns it back to the normal value"""
-    all_hosts_setting = target_sat.api.Setting().search(
-        query={'search': f'name={"new_hosts_page"}'}
-    )[0]
-    all_hosts_setting.value = 'True'
-    all_hosts_setting.update({'value'})
-    yield
-    all_hosts_setting.value = 'False'
-    all_hosts_setting.update({'value'})
 
 
 @pytest.mark.e2e
@@ -1293,8 +1283,8 @@ def test_positive_manage_table_columns(
         'Comment': False,
         'Installable updates': True,
         'RHEL Lifecycle status': False,
-        'Registered': True,
-        'Last checkin': True,
+        'Registered at': True,
+        'Last seen': True,
         'IPv4': True,
         'MAC': True,
         'Sockets': True,
@@ -1308,13 +1298,13 @@ def test_positive_manage_table_columns(
     ) as session:
         session.organization.select(org_name=current_sat_org.name)
         session.location.select(loc_name=current_sat_location.name)
-        session.host.manage_table_columns(columns)
+        session.all_hosts.manage_table_columns(columns)
         displayed_columns = session.host.get_displayed_table_headers()
         for column, is_displayed in columns.items():
             assert (column in displayed_columns) is is_displayed
 
 
-def test_all_hosts_manage_columns(target_sat, new_host_ui):
+def test_all_hosts_manage_columns(target_sat):
     """Verify that the manage columns widget changes the columns appropriately
 
     :id: 5e13267a-68d2-451a-ae00-6502dd5db7f4
@@ -1414,23 +1404,22 @@ def test_positive_update_delete_package(
     """
     client = rhel_contenthost
     client.add_rex_key(target_sat)
-<<<<<<< HEAD
-    module_repos_collection_with_setup.setup_virtual_machine(client, target_sat)
-=======
-    module_repos_collection_with_setup.setup_virtual_machine(client, enable_custom_repos=True)
->>>>>>> 2124586c5 ([SAT-33810] Hosts - VM setup for cases: module_streams, apply_erratum, delete_package (#19146))
+    module_repos_collection_with_setup.setup_virtual_machine(
+        vm=client,
+        enable_custom_repos=True,
+    )
     with session:
         session.location.select(loc_name=DEFAULT_LOC)
         product_name = module_repos_collection_with_setup.custom_product.name
-        repos = session.host_new.get_repo_sets(client.hostname, product_name)
-        assert repos[0].status == 'Enabled'
+
         session.host_new.override_repo_sets(client.hostname, product_name, "Override to disabled")
-        assert repos[0].status == 'Disabled'
-        session.host_new.install_package(client.hostname, FAKE_8_CUSTOM_PACKAGE_NAME)
+        repos = session.host_new.get_repo_sets(client.hostname, product_name)
+        assert repos[0]['Status'] == 'Disabled'
         result = client.run(f'yum install -y {FAKE_7_CUSTOM_PACKAGE}')
         assert result.status != 0
         session.host_new.override_repo_sets(client.hostname, product_name, "Override to enabled")
-        assert repos[0].status == 'Enabled'
+        repos = session.host_new.get_repo_sets(client.hostname, product_name)
+        assert repos[0]['Status'] == 'Enabled'
         # refresh repos on system
         client.run('subscription-manager repos')
         # install package
@@ -1443,9 +1432,9 @@ def test_positive_update_delete_package(
         task_status = target_sat.api.ForemanTask(id=task_result[0].id).poll()
         assert task_status['result'] == 'success'
         packages = session.host_new.get_packages(client.hostname, FAKE_8_CUSTOM_PACKAGE_NAME)
-        assert len(packages['table']) == 1
-        assert packages['table'][0]['Package'] == FAKE_8_CUSTOM_PACKAGE_NAME
-        assert 'Up-to date' in packages['table'][0]['Status']
+        assert len(packages) == 1
+        assert packages[0]['Package'] == FAKE_8_CUSTOM_PACKAGE_NAME
+        assert 'Up-to date' in packages[0]['Status']
         result = client.run(f'rpm -q {FAKE_8_CUSTOM_PACKAGE}')
         assert result.status == 0
 
@@ -1459,9 +1448,9 @@ def test_positive_update_delete_package(
 
         # filter packages
         packages = session.host_new.get_packages(client.hostname, FAKE_8_CUSTOM_PACKAGE_NAME)
-        assert len(packages['table']) == 1
-        assert packages['table'][0]['Package'] == FAKE_8_CUSTOM_PACKAGE_NAME
-        assert 'Upgradable' in packages['table'][0]['Status']
+        assert len(packages) == 1
+        assert packages[0]['Package'] == FAKE_8_CUSTOM_PACKAGE_NAME
+        assert 'Upgradable' in packages[0]['Status']
 
         # update package
         session.host_new.apply_package_action(
@@ -1475,7 +1464,7 @@ def test_positive_update_delete_package(
         task_status = target_sat.api.ForemanTask(id=task_result[0].id).poll()
         assert task_status['result'] == 'success'
         packages = session.host_new.get_packages(client.hostname, FAKE_8_CUSTOM_PACKAGE_NAME)
-        assert 'Up-to date' in packages['table'][0]['Status']
+        assert 'Up-to date' in packages[0]['Status']
 
         # remove package
         session.host_new.apply_package_action(client.hostname, FAKE_8_CUSTOM_PACKAGE_NAME, "Remove")
@@ -1487,7 +1476,7 @@ def test_positive_update_delete_package(
         task_status = target_sat.api.ForemanTask(id=task_result[0].id).poll()
         assert task_status['result'] == 'success'
         packages = session.host_new.get_packages(client.hostname, FAKE_8_CUSTOM_PACKAGE_NAME)
-        assert 'table' not in packages
+        assert not packages
         result = client.run(f'rpm -q {FAKE_8_CUSTOM_PACKAGE}')
         assert result.status != 0
 
@@ -1927,7 +1916,7 @@ def test_positive_tracer_enable_reload(tracer_install_host, target_sat):
         assert tracer_title == "No applications to restart"
 
 
-def test_all_hosts_delete(target_sat, function_org, function_location, new_host_ui):
+def test_all_hosts_delete(target_sat, function_org, function_location):
     """Create a host and delete it through All Hosts UI
 
     :id: 42b4560c-bb57-4c58-928e-e5fd5046b93f
@@ -1956,7 +1945,7 @@ def test_all_hosts_delete(target_sat, function_org, function_location, new_host_
         session.all_hosts.manage_table_columns({header: True for header in stripped_headers})
 
 
-def test_all_hosts_bulk_delete(target_sat, function_org, function_location, new_host_ui):
+def test_all_hosts_bulk_delete(target_sat, function_org, function_location):
     """Create several hosts, and delete them via Bulk Actions in All Hosts UI
 
     :id: af1b4a66-dd83-47c3-904b-e8627119cc53
@@ -1976,7 +1965,7 @@ def test_all_hosts_bulk_delete(target_sat, function_org, function_location, new_
 
 
 def test_all_hosts_bulk_cve_reassign(
-    target_sat, module_org, module_location, module_lce, module_cv, new_host_ui
+    target_sat, module_org, module_location, module_lce, module_cv
 ):
     """Create several hosts, and bulk assigns them a new CVE via All Hosts UI
 
@@ -2044,7 +2033,7 @@ def test_all_hosts_redirect_button(target_sat):
         assert "/new/hosts" in url
 
 
-def test_all_hosts_bulk_build_management(target_sat, function_org, function_location, new_host_ui):
+def test_all_hosts_bulk_build_management(target_sat, function_org, function_location):
     """Create several hosts, and manage them via Build Management in All Host UI
 
     :id: fff71945-6534-45cf-88a6-16b25c060f0a
@@ -2509,7 +2498,6 @@ def test_positive_manage_packages(
     module_target_sat,
     mod_content_hosts,
     module_repos_collection_with_setup,
-    new_host_ui,
     number_of_hosts,
     package_management_action,
     finish_via,
@@ -2813,7 +2801,6 @@ def test_all_hosts_manage_errata(
     function_repos_collection_with_manifest,
     manage_by_custom_rex,
     errata_to_install,
-    new_host_ui,
 ):
     """Apply an errata on multiple hosts through bulk errata wizard in All Hosts page.
 
