@@ -28,7 +28,8 @@ class TestActivationKey:
         The purpose of this fixture is to setup the activation key based on the provided
         organization, content_view and activation key name.
         """
-        org = target_sat.api.Organization(name=f"{request.param}_org").create()
+        org = target_sat.api.Organization(name=f"{request.param}_org_test3").create()
+        lce = target_sat.api.LifecycleEnvironment(organization=org).create()
         custom_repo = target_sat.api.Repository(
             product=target_sat.api.Product(organization=org).create()
         ).create()
@@ -37,8 +38,10 @@ class TestActivationKey:
             organization=org, repository=[custom_repo.id], name=f"{request.param}_cv"
         ).create()
         cv.publish()
+        cvv = cv.read().version[0].read()
+        cvv.promote(data={'environment_ids': lce.id, 'force': False})
         ak = target_sat.api.ActivationKey(
-            content_view=cv, organization=org, name=f"{request.param}_ak"
+            content_view=cv, organization=org, environment=lce, name=f"{request.param}_ak"
         ).create()
         return {'org': org, "cv": cv, 'ak': ak, 'custom_repo': custom_repo}
 
@@ -67,11 +70,6 @@ class TestActivationKey:
         :BlockedBy: SAT-28048
         """
         ak = activation_key_setup['ak']
-        org_subscriptions = target_sat.api.Subscription(
-            organization=activation_key_setup['org']
-        ).search()
-        for subscription in org_subscriptions:
-            ak.add_subscriptions(data={'quantity': 1, 'subscription_id': subscription.id})
         ak_subscriptions = ak.product_content()['results']
         subscr_id = {subscr['product']['id'] for subscr in ak_subscriptions}
         assert subscr_id == {activation_key_setup['custom_repo'].product.id}
@@ -97,7 +95,7 @@ class TestActivationKey:
         :BlockedBy: SAT-28048
         """
         pre_test_name = dependent_scenario_name
-        org = target_sat.api.Organization().search(query={'search': f'name={pre_test_name}_org'})
+        org = target_sat.api.Organization().search(query={'search': f'name={pre_test_name}_org_test3'})
         ak = target_sat.api.ActivationKey(organization=org[0]).search(
             query={'search': f'name={pre_test_name}_ak'}
         )
@@ -115,11 +113,6 @@ class TestActivationKey:
         custom_repo2.sync()
         cv2 = target_sat.api.ContentView(organization=org[0], repository=[custom_repo2.id]).create()
         cv2.publish()
-        org_subscriptions = target_sat.api.Subscription(organization=org[0]).search()
-        for subscription in org_subscriptions:
-            provided_products_ids = [prod.id for prod in subscription.read().provided_product]
-            if custom_repo2.product.id in provided_products_ids:
-                ak[0].add_subscriptions(data={'quantity': 1, 'subscription_id': subscription.id})
         ak_subscriptions = ak[0].product_content()['results']
         assert custom_repo2.product.id in {subscr['product']['id'] for subscr in ak_subscriptions}
         ak[0].delete()

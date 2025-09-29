@@ -55,7 +55,7 @@ class TestScenarioDBseedHostMismatch:
 
         :customerscenario: true
         """
-        ak = self.api.ActivationKey(
+        ak = target_sat.api.ActivationKey(
             content_view=function_org.default_content_view.id,
             environment=function_org.library.id,
             organization=function_org,
