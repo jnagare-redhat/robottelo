@@ -20,7 +20,13 @@ import pyotp
 import pytest
 
 from robottelo.config import settings
-from robottelo.constants import CERT_PATH, HAMMER_CONFIG, HAMMER_SESSIONS, LDAP_ATTR
+from robottelo.constants import (
+    CERT_PATH,
+    HAMMER_CONFIG,
+    HAMMER_SESSIONS,
+    LDAP_ATTR,
+    LOGIN_DELEGATION_LOGOUT_URL,
+)
 from robottelo.exceptions import CLIReturnCodeError
 from robottelo.logging import logger
 from robottelo.utils.datafactory import gen_string
@@ -265,6 +271,8 @@ def test_single_sign_on_using_rhsso(
 
     :setup: Enroll the RH-SSO Configuration for External Authentication
 
+    :verifies: SAT-40322
+
     :steps:
         1. Create Mappers on RHSSO Instance and Update the Settings in Satellite
         2. Login into Satellite using RHSSO login page redirected by Satellite
@@ -280,6 +288,24 @@ def test_single_sign_on_using_rhsso(
             session.user.search('')
         actual_user = session.task.read_all(widget_names="current_user")['current_user']
         assert settings.rhsso.rhsso_user in actual_user
+        # logout verification for SAT-40322
+        setting_object = module_target_sat.api.Setting().search(
+            query={'search': 'name=login_delegation_logout_url'}
+        )[0]
+        default_setting_value = '' if setting_object.value is None else setting_object.value
+        setting_object.value = LOGIN_DELEGATION_LOGOUT_URL
+        setting_object.update({'value'})
+        try:
+            session.rhsso_login.logout()
+            assert session.browser.url == LOGIN_DELEGATION_LOGOUT_URL, (
+                "Unsuccessful logout redirect"
+            )
+            with pytest.raises(NavigationTriesExceeded) as error:
+                session.task.read_all(widget_names='current_user')['current_user']
+            assert error.typename == 'NavigationTriesExceeded'
+        finally:
+            setting_object.value = default_setting_value
+            setting_object.update({'value'})
 
 
 def test_external_logout_rhsso(rhsso_setting_setup, enable_external_auth_rhsso, module_target_sat):
@@ -853,6 +879,10 @@ def test_positive_negotiate_logout(
         2. Hammer command fails after log out.
         3. Proper messages are returned in all cases.
     """
+    hostname = (
+        getattr(parametrized_enrolled_sat, 'shortened_hostname', None)
+        or parametrized_enrolled_sat.hostname
+    )
     auth_type = request.node.callspec.params['parametrized_enrolled_sat']
     user = (
         settings.ipa.user
@@ -869,9 +899,7 @@ def test_positive_negotiate_logout(
     # Log out, verify the hammer sessions was closed
     result = parametrized_enrolled_sat.cli.Auth.logout()
     assert 'Logged out.' in str(result)
-    result = parametrized_enrolled_sat.execute(
-        f'cat {HAMMER_SESSIONS}/https_{parametrized_enrolled_sat.hostname}'
-    )
+    result = parametrized_enrolled_sat.execute(f'cat {HAMMER_SESSIONS}/https_{hostname}')
     assert '"id":null' in result.stdout
     result = parametrized_enrolled_sat.cli.Auth.status()
     assert NO_SESSION_BUT_KERB_MSG in str(result)

@@ -10,6 +10,8 @@ import json
 from pathlib import Path, PurePath
 import random
 import re
+import subprocess
+import sys
 from tempfile import NamedTemporaryFile
 import time
 from urllib.parse import urljoin, urlparse, urlunsplit
@@ -17,6 +19,7 @@ from urllib.parse import urljoin, urlparse, urlunsplit
 import apypie
 from box import Box
 from broker import Broker
+from broker.helpers import FileLock
 from broker.hosts import Host
 from dynaconf.vendor.box.exceptions import BoxKeyError
 from fauxfactory import gen_alpha, gen_string
@@ -152,7 +155,11 @@ class ContentHost(Host, ContentHostMixins):
     @property
     def network_type(self):
         if not hasattr(self, '_net_type'):
-            self._net_type = NetworkType(settings.content_host.network_type)
+            broker_args = getattr(self, '_broker_args', None) or {}
+            if nt := broker_args.get('net_type'):
+                self._net_type = NetworkType(nt)
+            else:
+                self._net_type = NetworkType(settings.content_host.network_type)
         return self._net_type
 
     @classmethod
@@ -652,18 +659,18 @@ class ContentHost(Host, ContentHostMixins):
             'update-packages': str(update_packages).lower(),
         }
         if org is not None:
-            if isinstance(org, entities.Organization):
-                options['organization-id'] = org.id
-            elif isinstance(org, dict):
+            if isinstance(org, dict):
                 options['organization-id'] = org['id']
+            elif hasattr(org, 'id'):
+                options['organization-id'] = org.id
             else:
                 raise ValueError('org must be a dict or an Organization object')
 
         if loc is not None:
-            if isinstance(loc, entities.Location):
-                options['location-id'] = loc.id
-            elif isinstance(loc, dict):
+            if isinstance(loc, dict):
                 options['location-id'] = loc['id']
+            elif hasattr(loc, 'id'):
+                options['location-id'] = loc.id
             else:
                 raise ValueError('loc must be a dict or a Location object')
 
@@ -1602,9 +1609,12 @@ class ContentHost(Host, ContentHostMixins):
                 snap=settings.server.version.snap,
             )
 
-    def setup_capsule_repos(self):
+    def setup_capsule_repos(self, release=None):
         """Setup Capsule repositories on host
         requires registered host if ga source has to be enabled
+
+        Args:
+            release: Override capsule version release (Default: settings.capsule.version.release)
         """
         if settings.capsule.version.source == "ga":
             # enable cdn repos
@@ -1617,8 +1627,8 @@ class ContentHost(Host, ContentHostMixins):
         else:
             self.download_repofile(
                 product='capsule',
-                release=settings.capsule.version.release,
-                snap=settings.capsule.version.snap,
+                release=release or settings.capsule.version.release,
+                snap='' if release else settings.capsule.version.snap,
             )
 
     def ensure_podman_installed(self):
@@ -1838,12 +1848,21 @@ class Capsule(ContentHost, CapsuleMixins):
         """Get capsule features"""
         return requests.get(f'https://{self.hostname}:9090/features', verify=False).text
 
-    def capsule_setup(self, sat_host=None, capsule_cert_opts=None, **installer_kwargs):
-        """Prepare the host and run the capsule installer"""
+    def capsule_setup(
+        self, sat_host=None, capsule_cert_opts=None, release=None, **installer_kwargs
+    ):
+        """Prepare the host and run the capsule installer
 
+        Args:
+            sat_host: Satellite host object
+            capsule_cert_opts: Certificate options for capsule
+            release: Override capsule version release for upgrade testing (Default: settings.capsule.version.release)
+        Kwargs:
+            installer_kwargs: Additional installer arguments
+        """
         self.register_to_cdn()
         self.setup_rhel_repos()
-        self.setup_capsule_repos()
+        self.setup_capsule_repos(release=release)
 
         # After capsule registration to cdn, it should be initialized with the Satellite.
         self._satellite = sat_host or Satellite()
@@ -1991,15 +2010,51 @@ class Satellite(Capsule, SatelliteMixins):
 
     def _swap_nailgun(self, new_version):
         """Install a different version of nailgun from GitHub and invalidate the module cache."""
-        import sys
 
-        from pip._internal import main as pip_main
+        logger.debug(f'Installing nailgun for new_version: {new_version}')
+        nailgun_ref = 'master' if new_version == 'stream' else f'{new_version}.z'
 
-        pip_main(['uninstall', '-y', 'nailgun'])
-        pip_main(['install', f'https://github.com/SatelliteQE/nailgun/archive/{new_version}.zip'])
+        # Use file locking to prevent race conditions when multiple xdist workers
+        # try to install/uninstall nailgun simultaneously
+        lock_file = Path('/tmp/nailgun-install')
+        with FileLock(lock_file, timeout=120):
+            logger.debug('Acquired nailgun install lock, running pip commands')
+
+            expected_url = f'https://github.com/SatelliteQE/nailgun/archive/{nailgun_ref}.zip'
+            # Check if correct version already installed
+            result = subprocess.run(
+                [sys.executable, '-m', 'pip', 'freeze'], capture_output=True, text=True, check=True
+            )
+            is_installed = any(
+                line.startswith('nailgun') and expected_url in line
+                for line in result.stdout.split('\n')
+            )
+            if is_installed:
+                logger.debug(f'Nailgun {new_version} already installed, skipping pip install')
+            else:
+                logger.debug(f'Nailgun {new_version} not already installed, running pip install')
+                subprocess.run(
+                    [sys.executable, '-m', 'pip', 'uninstall', '-y', 'nailgun'], check=True
+                )
+                subprocess.run(
+                    [
+                        sys.executable,
+                        '-m',
+                        'pip',
+                        'install',
+                        expected_url,
+                    ],
+                    check=True,
+                )
+            logger.debug('Nailgun pip commands complete, releasing lock')
+
+        # Clear module cache after lock is released (each worker clears its own cache).
+        # Run this even if the worker didn't need to reinstall nailgun,
+        # to make sure it has the correct api.
         self._api = type('api', (), {'_configured': False})
         to_clear = [k for k in sys.modules if 'nailgun' in k]
-        [sys.modules.pop(k) for k in to_clear]
+        for k in to_clear:
+            sys.modules.pop(k)
 
     @property
     def api(self):

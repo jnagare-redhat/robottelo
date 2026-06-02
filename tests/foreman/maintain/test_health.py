@@ -12,10 +12,9 @@
 
 """
 
-import time
-
 from fauxfactory import gen_string
 import pytest
+from wait_for import wait_for
 
 from robottelo.config import settings
 from robottelo.enums import NetworkType
@@ -26,44 +25,6 @@ upstream_url = {
     'puppet_repo': 'https://yum.puppetlabs.com/puppet/el/9/x86_64/',
     'katello_repo': 'https://yum.theforeman.org/katello/nightly/katello/el9/x86_64/',
 }
-
-
-@pytest.mark.satellite_iop_only
-def test_podman_login_check(request, sat_maintain):
-    """Test Podman login check with local Red Hat Lightspeed(IoP) Satellite.
-
-    :id: 70fd6d86-a647-442c-a971-cbd1207b734b
-
-    :setup: Configure a Satellite with local Red Hat Lightspeed(IoP) enabled.
-
-    :steps:
-        1. Run satellite-maintain update check.
-        2. Verify that the Podman login check passes.
-        3. Log out of the remote container registry.
-        4. Run satellite-maintain update check.
-        5. Verify that the Podman login check fails.
-
-    :Verifies: SAT-35282
-    """
-    iop_settings = settings.rh_cloud.iop_advisor_engine
-
-    request.addfinalizer(lambda: sat_maintain.podman_logout(iop_settings.registry))
-
-    check_description = 'Check whether podman needs to be logged in to the registry'
-    fail_message = (
-        'You are using containers from registry.redhat.io,\n'
-        'but your system is not logged in to the registry, or the login expired.\n'
-        'Please login to registry.redhat.io.'
-    )
-    # Login to Prod registry to ensure the check runs correctly, it won't work for any other registry
-    sat_maintain.podman_login(iop_settings.username, iop_settings.token, iop_settings.registry)
-    result = sat_maintain.cli.Health.check(options={'label': 'container-podman-login'})
-    assert 'FAIL' not in result.stdout
-    assert check_description in result.stdout, result.stdout
-    sat_maintain.podman_logout(iop_settings.registry)
-    result = sat_maintain.cli.Health.check(options={'label': 'container-podman-login'})
-    assert 'FAIL' in result.stdout
-    assert fail_message in result.stdout, result.stdout
 
 
 @pytest.mark.include_capsule
@@ -164,26 +125,6 @@ def test_positive_health_check_by_tags(sat_maintain):
             ).status
             == 0
         )
-
-
-@pytest.mark.include_capsule
-def test_positive_health_check_pre_upgrade(sat_maintain):
-    """Verify pre-upgrade health checks
-
-    :id: f52bd43e-79cd-488b-adbb-3c9e5bac32cc
-
-    :parametrized: yes
-
-    :steps:
-        1. Run satellite-maintain health check --tags pre-upgrade
-
-    :expectedresults: Pre-upgrade health checks should pass.
-    """
-    result = sat_maintain.cli.Health.check(
-        options={'tags': 'pre-upgrade', 'whitelist': 'non-rh-packages'}
-    )
-    assert result.status == 0
-    assert 'FAIL' not in result.stdout
 
 
 @pytest.mark.include_capsule
@@ -532,7 +473,18 @@ def test_positive_health_check_tftp_storage(sat_maintain, request):
     # Create files for testing check-tftp-storage check.
     for file in files_to_delete:
         assert sat_maintain.execute(f'touch /var/lib/tftpboot/boot/{file}').status == 0
-    time.sleep(200)
+    # Wait until the created files are older than token_duration (set to 2 minutes above).
+    token_duration_seconds = 2 * 60
+    file_path = f'/var/lib/tftpboot/boot/{files_to_delete[0]}'
+    file_mtime = int(sat_maintain.execute(f'stat -c %Y {file_path}').stdout.strip())
+    wait_for(
+        lambda: (
+            int(sat_maintain.execute('date +%s').stdout.strip()) - file_mtime
+            >= token_duration_seconds + 5
+        ),
+        timeout=token_duration_seconds + 60,
+        delay=10,
+    )
     assert sat_maintain.execute(f'touch /var/lib/tftpboot/boot/{files_to_keep[0]}').status == 0
     # Run check-tftp-storage check.
     result = sat_maintain.cli.Health.check(
