@@ -19,6 +19,33 @@ from robottelo.config import settings
 from robottelo.enums import NetworkType
 
 
+@pytest.fixture(scope='module')
+def module_host_with_facts(module_target_sat):
+    """Ensure the Satellite has at least one host with reported facts.
+
+    On installer-based Satellites the Satellite itself is a registered host with facts.
+    On containerized Satellites no host exists, so we upload facts via the API.
+    """
+    existing = module_target_sat.cli.Fact().list(options={'search': 'fact=system_uptime'})
+    if existing:
+        return
+    hostname = f'{gen_string("alpha")}.example.com'
+    module_target_sat.api.Host().upload_facts(
+        data={
+            'name': hostname,
+            'certname': hostname,
+            'facts': {
+                'operatingsystem': 'RedHat',
+                'operatingsystemrelease': f'{settings.content_host.default_rhel_version}',
+                'system_uptime': {'seconds': '86400', 'days': '1'},
+                'os': {'family': 'RedHat'},
+                'memory': {'system': {'total': '3.68 GiB'}},
+                'networking': {'ip': '10.0.0.1', 'ip6': '::1'},
+            },
+        }
+    )
+
+
 @pytest.mark.upgrade
 @pytest.mark.parametrize(
     'fact',
@@ -30,7 +57,7 @@ from robottelo.enums import NetworkType
         'networking::ip6' if settings.server.network_type == NetworkType.IPV6 else 'networking::ip',
     ],
 )
-def test_positive_list_by_name(fact, module_target_sat):
+def test_positive_list_by_name(fact, module_host_with_facts, module_target_sat):
     """Test Fact List
 
     :id: 83794d97-d21b-4482-9522-9b41053e595f
