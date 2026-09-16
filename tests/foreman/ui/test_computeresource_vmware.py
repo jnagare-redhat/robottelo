@@ -104,13 +104,19 @@ def get_vmware_storagepod_summary_string(vmware, vmwareclient):
 
 @pytest.mark.e2e
 @pytest.mark.parametrize('vmware', ['vmware7', 'vmware8'], indirect=True)
-def test_positive_cr_end_to_end(session, module_org, module_location, vmware, module_target_sat):
+def test_positive_cr_end_to_end(
+    request, session, module_org, module_location, vmware, module_target_sat
+):
     """Perform end-to-end testing for compute resource VMware component.
 
     :id: 47fc9e77-5b22-46b4-a76c-3217434fde2f
 
     :expectedresults: All expected CRUD actions finished successfully.
+
+    :Verifies: SAT-44626
     """
+    if 'vmware7' in request.node.callspec.id and module_target_sat.is_fips_enabled():
+        pytest.skip('VMware 7 is not supported in FIPS mode')
     cr_name = gen_string('alpha')
     new_cr_name = gen_string('alpha')
     description = gen_string('alpha')
@@ -210,13 +216,18 @@ def test_positive_retrieve_virtual_machine_list(session, vmware):
 
 @pytest.mark.e2e
 @pytest.mark.parametrize('vmware', ['vmware7', 'vmware8'], indirect=True)
-def test_positive_image_end_to_end(session, target_sat, vmware):
+def test_positive_image_end_to_end(request, session, target_sat, vmware):
     """Perform end to end testing for compute resource VMware component image.
 
     :id: 6b7949ef-c684-40aa-b181-11f8d4cd39c6
 
     :expectedresults: All expected CRUD actions finished successfully.
+
+    :Verifies: SAT-44626
     """
+    if 'vmware7' in request.node.callspec.id and target_sat.is_fips_enabled():
+        pytest.skip('VMware 7 is not supported in FIPS mode')
+
     cr_name = gen_string('alpha')
     image_name = gen_string('alpha')
     new_image_name = gen_string('alpha')
@@ -298,10 +309,12 @@ def test_positive_resource_vm_power_management(session, vmware):
         try:
             wait_for(
                 lambda: (
-                    session.browser.refresh(),
-                    session.computeresource.vm_status(cr_name, vm_name),
-                )[1]
-                is not power_status,
+                    (
+                        session.browser.refresh(),
+                        session.computeresource.vm_status(cr_name, vm_name),
+                    )[1]
+                    is not power_status
+                ),
                 timeout=30,
                 delay=2,
             )
@@ -330,8 +343,10 @@ def test_positive_vmware_custom_profile_end_to_end(
 
     :BZ: 1315277
 
-    :verifies: SAT-31447
+    :verifies: SAT-31447, SAT-44626
     """
+    if 'vmware7' in request.node.callspec.id and target_sat.is_fips_enabled():
+        pytest.skip('VMware 7 is not supported in FIPS mode')
     cr_name = gen_string('alpha')
     guest_os_names = [
         'Red Hat Enterprise Linux 7 (64-bit)',
@@ -529,10 +544,12 @@ def test_positive_virt_card(session, target_sat, module_location, module_org, vm
             try:
                 wait_for(
                     lambda: (
-                        session.browser.refresh(),
-                        session.computeresource.vm_status(cr_name, settings.vmware.vm_name),
-                    )[1]
-                    is not power_status,
+                        (
+                            session.browser.refresh(),
+                            session.computeresource.vm_status(cr_name, settings.vmware.vm_name),
+                        )[1]
+                        is not power_status
+                    ),
                     timeout=30,
                     delay=2,
                 )
@@ -666,9 +683,11 @@ def test_positive_provision_end_to_end(
         host_fqdn = f'{host_name}.{module_vmware_hostgroup.domain.read().name}'
         request.addfinalizer(lambda: target_sat.provisioning_cleanup(host_fqdn))
         wait_for(
-            lambda: session.host_new.get_host_statuses(host_fqdn)['Build']['Status']
-            != 'Pending installation'
-            and session.host_new.get_host_statuses(host_fqdn)['Execution']['Status'] != 'N/A',
+            lambda: (
+                session.host_new.get_host_statuses(host_fqdn)['Build']['Status']
+                != 'Pending installation'
+                and session.host_new.get_host_statuses(host_fqdn)['Execution']['Status'] != 'N/A'
+            ),
             timeout=1800,
             delay=30,
             fail_func=session.browser.refresh,

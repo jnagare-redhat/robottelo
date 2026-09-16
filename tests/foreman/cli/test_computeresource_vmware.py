@@ -23,7 +23,7 @@ from robottelo.hosts import ContentHost
 @pytest.mark.e2e
 @pytest.mark.upgrade
 @pytest.mark.parametrize('vmware', ['vmware7', 'vmware8'], indirect=True)
-def test_positive_vmware_cr_end_to_end(target_sat, module_org, module_location, vmware):
+def test_positive_vmware_cr_end_to_end(request, target_sat, module_org, module_location, vmware):
     """Create, Read, Update and Delete VMware compute resources
 
     :id: 96faae3f-bc64-4147-a9fc-09c858e0a68f
@@ -34,8 +34,12 @@ def test_positive_vmware_cr_end_to_end(target_sat, module_org, module_location, 
 
     :BZ: 1387917
 
+    :Verifies: SAT-44626
+
     :CaseImportance: Critical
     """
+    if 'vmware7' in request.node.callspec.id and target_sat.is_fips_enabled():
+        pytest.skip('VMware 7 is not supported in FIPS mode')
     cr_name = gen_string('alpha')
     # Create
     vmware_cr = target_sat.cli.ComputeResource.create(
@@ -93,6 +97,8 @@ def test_positive_provision_end_to_end(
     provision_method,
     vmware,
     vmwareclient,
+    configure_secureboot_provisioning,
+    configure_uefi_provisioning_for_older_rhels,
 ):
     """Provision a host on vmware compute resource with
     the help of hostgroup.
@@ -112,6 +118,9 @@ def test_positive_provision_end_to_end(
 
     :customerscenario: true
     """
+    if provision_method == 'bootdisk' and pxe_loader.vm_firmware == 'uefi_secure_boot':
+        pytest.skip('Bootdisk + Secureboot provisioning is not yet supported')
+
     sat = module_provisioning_sat.sat
     hostname = gen_string('alpha').lower()
     host = sat.cli.Host.create(
@@ -142,8 +151,10 @@ def test_positive_provision_end_to_end(
     # check if vm is created on vmware
     assert vmwareclient.does_vm_exist(hostname) is True
     wait_for(
-        lambda: sat.cli.Host.info({'name': hostname})['status']['build-status']
-        != 'Pending installation',
+        lambda: (
+            sat.cli.Host.info({'name': hostname})['status']['build-status']
+            != 'Pending installation'
+        ),
         timeout=1800,
         delay=30,
     )
@@ -234,8 +245,10 @@ def test_positive_image_provision_end_to_end(
         assert 'VirtualTPM' in vm.get_virtual_device_type_names()
 
     wait_for(
-        lambda: sat.cli.Host.info({'name': hostname})['status']['build-status']
-        != 'Pending installation',
+        lambda: (
+            sat.cli.Host.info({'name': hostname})['status']['build-status']
+            != 'Pending installation'
+        ),
         timeout=1800,
         delay=30,
     )

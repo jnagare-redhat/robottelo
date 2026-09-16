@@ -14,7 +14,7 @@ import subprocess
 import sys
 from tempfile import NamedTemporaryFile
 import time
-from urllib.parse import urljoin, urlparse, urlunsplit
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import apypie
 from box import Box
@@ -1018,9 +1018,7 @@ class ContentHost(Host, ContentHostMixins):
                 f'Failed to put hostname in ssh known_hosts files:\n{result.stderr}'
             )
 
-    def configure_puppet(
-        self, proxy_hostname=None, run_puppet_agent=True, install_puppet_agent7=False
-    ):
+    def configure_puppet(self, proxy_hostname=None, run_agent=True, use_openvox=True):
         """Configures puppet on the virtual machine/Host.
         :param proxy_hostname: external capsule hostname
         :return: None.
@@ -1029,21 +1027,21 @@ class ContentHost(Host, ContentHostMixins):
         if proxy_hostname is None:
             proxy_hostname = settings.server.hostname
 
-        if install_puppet_agent7:
+        self.create_custom_repos(
+            sat_client=settings.repos.satclient_repo[f'RHEL{self.os_version.major}']
+        )
+        if use_openvox:
             self.create_custom_repos(
-                sat_client=settings.repos['SATCLIENT_REPO'][f'RHEL{self.os_version.major}']
-            )
-        else:
-            self.create_custom_repos(
-                sat_client=settings.repos['SATCLIENT2_REPO'][f'RHEL{self.os_version.major}']
+                openvox_agent=settings.repos.openvox_agent_repo[f'RHEL{self.os_version.major}']
             )
 
-        result = self.execute('yum install puppet-agent -y')
-        if result.status != 0:
-            raise ContentHostError('Failed to install the puppet-agent rpm')
+        rpm_name = 'openvox-agent' if use_openvox else 'puppet-agent'
+        if self.execute(f'yum -y install {rpm_name}').status != 0:
+            raise ContentHostError('Failed to install the puppet agent rpm')
 
-        rpm_version = self.execute('rpm -q --qf "%{VERSION}" puppet-agent').stdout
-        assert '7' in rpm_version if install_puppet_agent7 else '7' not in rpm_version
+        assert self.execute(f'rpm -q {rpm_name}').status == 0, (
+            'Puppet agent package is not installed'
+        )
 
         cert_name = self.hostname
         puppet_conf = (
@@ -1070,11 +1068,9 @@ class ContentHost(Host, ContentHostMixins):
         proxy_host = Host(hostname=proxy_hostname, ipv6=self.network_type == NetworkType.IPV6)
         proxy_host.execute(f'puppetserver ca sign --certname {cert_name}')
 
-        if run_puppet_agent:
-            # This particular puppet run would create the host entity under
-            # 'All Hosts' and let's redirect stderr to /dev/null as errors at
-            #  this stage can be ignored.
-            result = self.execute('/opt/puppetlabs/bin/puppet agent -t 2> /dev/null')
+        if run_agent:
+            # This particular puppet run would create the host entity under 'All Hosts'
+            result = self.execute('/opt/puppetlabs/bin/puppet agent -t')
             if result.status:
                 raise ContentHostError('Failed to configure puppet on the content host')
 
@@ -2188,9 +2184,9 @@ class Satellite(Capsule, SatelliteMixins):
                 yield ui_session
         finally:
             if self.record_property is not None and settings.ui.record_video:
-                video_url = settings.ui.grid_url.replace(
-                    ':4444', f'/videos/{ui_session.ui_session_id}/video.mp4'
-                )
+                grid_url = urlsplit(settings.ui.grid_url)
+                video_path = f'/videos/{ui_session.ui_session_id}/{ui_session.ui_session_id}.mp4'
+                video_url = urlunsplit((grid_url.scheme, grid_url.hostname, video_path, '', ''))
                 self.record_property('video_url', video_url)
                 self.record_property('session_id', ui_session.ui_session_id)
 
@@ -2228,7 +2224,22 @@ class Satellite(Capsule, SatelliteMixins):
             http_proxy_name = 'IPv6 HTTP Proxy for Content sync'
             http_proxy_url = settings.http_proxy.http_proxy_ipv6_url
         if not self.cli.HttpProxy.exists(search=('name', http_proxy_name)):
-            http_proxy = self.api.HTTPProxy(name=http_proxy_name, url=http_proxy_url).create()
+            try:
+                http_proxy = self.api.HTTPProxy(name=http_proxy_name, url=http_proxy_url).create()
+            except requests.exceptions.HTTPError as err:
+                response = getattr(err, 'response', None)
+                if (
+                    response is None
+                    or response.status_code != 422
+                    or 'already been taken' not in (response.text or '')
+                ):
+                    raise
+                # Race between xdist workers: another worker created the proxy
+                # after our CLI check but before our API create call.
+                logger.info(f'HTTP Proxy "{http_proxy_name}" already exists, using existing proxy.')
+                http_proxy = self.api.HTTPProxy().search(
+                    query={'search': f'name="{http_proxy_name}"'}
+                )[0]
         else:
             logger.info('The HTTP Proxy is already enabled. Skipping the HTTP Proxy setup.')
             http_proxy = self.api.HTTPProxy().search(query={'search': f'name="{http_proxy_name}"'})[
@@ -2715,10 +2726,14 @@ class Satellite(Capsule, SatelliteMixins):
             data={'disconnected': disconnected}
         )
         wait_for(
-            lambda: self.api.ForemanTask()
-            .search(query={'search': f'{generate_report_task} and started_at >= "{timestamp}"'})[0]
-            .result
-            == 'success',
+            lambda: (
+                self.api.ForemanTask()
+                .search(
+                    query={'search': f'{generate_report_task} and started_at >= "{timestamp}"'}
+                )[0]
+                .result
+                == 'success'
+            ),
             timeout=400,
             delay=15,
             silent_failure=True,
@@ -2729,10 +2744,12 @@ class Satellite(Capsule, SatelliteMixins):
         """Perform inventory sync"""
         inventory_sync = self.api.Organization(id=org.id).rh_cloud_inventory_sync()
         wait_for(
-            lambda: self.api.ForemanTask()
-            .search(query={'search': f'id = {inventory_sync["task"]["id"]}'})[0]
-            .result
-            == 'success',
+            lambda: (
+                self.api.ForemanTask()
+                .search(query={'search': f'id = {inventory_sync["task"]["id"]}'})[0]
+                .result
+                == 'success'
+            ),
             timeout=400,
             delay=15,
             silent_failure=True,
